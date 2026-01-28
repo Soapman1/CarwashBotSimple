@@ -17,6 +17,10 @@ from database import init_db, create_user, get_user_by_telegram, update_subscrip
 # Настройки
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
+# ===== WEBHOOK НАСТРОЙКИ (для Render) =====
+WEBHOOK_HOST = os.getenv('RENDER_EXTERNAL_HOSTNAME')  # Render дает автоматически
+WEBHOOK_PATH = f'/webhook/{TOKEN}'  # Уникальный путь
+WEBHOOK_URL = f"https://{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN не установлен! Добавь переменную в Render.")
@@ -31,6 +35,28 @@ dp = Dispatcher(bot, storage=storage)
 
 # Инициализация базы данных
 init_db()
+
+async def on_startup(dp):
+    # Устанавливаем webhook
+    if WEBHOOK_HOST:
+        await bot.set_webhook(WEBHOOK_URL)
+        print(f"✅ Webhook установлен: {WEBHOOK_URL}")
+    else:
+        print("⚠️ Webhook host не найден, используем polling")
+    
+    # Запускаем health check сервер
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+
+async def on_shutdown(dp):
+    # Удаляем webhook при остановке
+    await bot.delete_webhook()
+    print("❌ Webhook удален")
 
 # ===== ТРАНСЛИТЕРАЦИЯ =====
 def transliterate(name):
@@ -277,13 +303,24 @@ async def on_startup(dp):
     print(f"✅ Web server started on port {PORT}")
 
 if __name__ == "__main__":
-    # skip_updates=True — игнорирует сообщения, которые пришли пока бот был офлайн
-    # reset_webhook=True — сбрасывает webhook (если был установлен)
-    executor.start_polling(
-        dp, 
-        skip_updates=True, 
-        reset_webhook=True,
-        on_startup=on_startup,
-        timeout=20,
-        relax=0.1
-    )
+    if WEBHOOK_HOST:
+        # Webhook режим (для Render production)
+        from aiogram import executor
+        executor.start_webhook(
+            dispatcher=dp,
+            webhook_path=WEBHOOK_PATH,
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+            skip_updates=True,
+            host='0.0.0.0',
+            port=PORT,
+        )
+    else:
+        # Polling режим (для локального теста)
+        from aiogram import executor
+        executor.start_polling(
+            dp, 
+            skip_updates=True, 
+            on_startup=on_startup,
+            reset_webhook=True  # Сбрасываем webhook если был
+        )
