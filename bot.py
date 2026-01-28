@@ -2,32 +2,31 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.enums import ParseMode
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-import aiohttp
+from aiogram import Bot, Dispatcher, executor, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.dispatcher.filters import Text
 from aiohttp import web
+import random
+import string
 
-# Настройки из переменных окружения (Render их подставит сам)
+# Настройки
 TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", 10000))  # Render даёт порт автоматически
+PORT = int(os.getenv("PORT", 10000))
 
-# Логирование
 logging.basicConfig(level=logging.INFO)
 
-# Бот и диспетчер
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher(storage=MemoryStorage())
+# Бот и диспетчер (aiogram 2.x стиль)
+bot = Bot(token=TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
 
-# ===== БАЗА ДАННЫХ (пока просто в памяти, потом заменим на PostgreSQL) =====
-users = {}  # {telegram_id: {"login": "...", "sub_end": "...", ...}}
+# ===== БАЗА ДАННЫХ (в памяти) =====
+users = {}
 
 # ===== ТРАНСЛИТЕРАЦИЯ =====
 def transliterate(name):
-    """Превращает 'Солнце' в 'Solntse'"""
     letters = {
         'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e',
         'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
@@ -40,91 +39,73 @@ def transliterate(name):
         result += letters.get(char, char)
     return result.capitalize()[:20]
 
-# ===== КНОПКИ =====
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-
+# ===== КЛАВИАТУРЫ =====
 def get_menu(user_id):
-    """Возвращает клавиатуру в зависимости от статуса"""
     if user_id not in users:
-        # Новый пользователь - только регистрация
-        return ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="📝 Зарегистрироваться")]], 
-            resize_keyboard=True
-        )
+        return types.ReplyKeyboardMarkup(resize_keyboard=True).add("📝 Зарегистрироваться")
     
-    # Проверяем подписку
     sub_end = users[user_id].get("sub_end")
     if sub_end and datetime.fromisoformat(sub_end) > datetime.now():
-        # Активная подписка
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="💳 Продлить подписку")],
-                [KeyboardButton(text="ℹ️ Моя подписка")],
-                [KeyboardButton(text="❌ Отменить подписку")]
-            ],
-            resize_keyboard=True
-        )
+        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.row("💳 Продлить подписку")
+        kb.row("ℹ️ Моя подписка")
+        kb.row("❌ Отменить подписку")
+        return kb
     else:
-        # Нет подписки
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="💳 Оплатить подписку")],
-                [KeyboardButton(text="ℹ️ Мой аккаунт")]
-            ],
-            resize_keyboard=True
-        )
+        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.row("💳 Оплатить подписку")
+        kb.row("ℹ️ Мой аккаунт")
+        return kb
 
-# ===== ОБРАБОТЧИКИ =====
+# ===== СОСТОЯНИЯ =====
 class RegState(StatesGroup):
     waiting_name = State()
     waiting_owner = State()
 
-@dp.message(F.text == "/start")
-async def cmd_start(message: Message):
+# ===== ОБРАБОТЧИКИ =====
+@dp.message_handler(commands=['start'])
+async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Привет! Я бот для управления автомойкой.\n\n"
-        "Нажми '📝 Зарегистрироваться' чтобы создать аккаунт.",
+        "👋 Привет! Нажми '📝 Зарегистрироваться' чтобы создать аккаунт.",
         reply_markup=get_menu(message.from_user.id)
     )
 
-@dp.message(F.text == "📝 Зарегистрироваться")
-async def start_reg(message: Message, state: FSMContext):
-    await state.set_state(RegState.waiting_name)
+@dp.message_handler(Text(equals="📝 Зарегистрироваться"))
+async def start_reg(message: types.Message):
+    await RegState.waiting_name.set()
     await message.answer("Введите название вашей автомойки (например: 'Саларьево'):")
 
-@dp.message(RegState.waiting_name)
-async def get_carwash_name(message: Message, state: FSMContext):
+@dp.message_handler(state=RegState.waiting_name)
+async def get_carwash_name(message: types.Message, state: FSMContext):
     name = message.text
     login = transliterate(name)
     
     await state.update_data(carwash=name, login=login)
-    await state.set_state(RegState.waiting_owner)
+    await RegState.waiting_owner.set()
     
     await message.answer(
-        f"✅ Название принято! Ваш логин будет: <b>{login}</b>\n\n"
-        f"Теперь введите ваше имя (владельца):"
+        f"✅ Ваш логин будет: <b>{login}</b>\n\nТеперь введите ваше имя:",
+        parse_mode="HTML"
     )
 
-@dp.message(RegState.waiting_owner)
-async def get_owner(message: Message, state: FSMContext):
+@dp.message_handler(state=RegState.waiting_owner)
+async def get_owner(message: types.Message, state: FSMContext):
     data = await state.get_data()
     owner = message.text
     login = data["login"]
     
     # Генерируем пароль
-    import random, string
     password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
     
-    # Сохраняем пользователя
     users[message.from_user.id] = {
         "carwash": data["carwash"],
         "owner": owner,
         "login": login,
         "password": password,
-        "sub_end": None  # Подписки пока нет
+        "sub_end": None
     }
     
-    await state.clear()
+    await state.finish()
     
     await message.answer(
         f"🎉 <b>Аккаунт создан!</b>\n\n"
@@ -132,98 +113,69 @@ async def get_owner(message: Message, state: FSMContext):
         f"👤 Владелец: {owner}\n"
         f"🔑 Логин: <code>{login}</code>\n"
         f"🔒 Пароль: <code>{password}</code>\n\n"
-        f"⚠️ <b>Сохраните эти данные!</b>\n\n"
-        f"Теперь можно активировать тестовую подписку.",
+        f"⚠️ <b>Сохраните эти данные!</b>",
+        parse_mode="HTML",
         reply_markup=get_menu(message.from_user.id)
     )
 
-# ===== ОПЛАТА (ЗАГЛУШКА - БЕСПЛАТНО) =====
-@dp.message(F.text.in_(["💳 Оплатить подписку", "💳 Продлить подписку"]))
-async def buy_sub(message: Message):
-    # Создаём кнопки выбора периода
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ 1 месяц (тест)", callback_data="pay_1")],
-        [InlineKeyboardButton(text="✅ 6 месяцев (тест)", callback_data="pay_6")]
-    ])
+# ===== ОПЛАТА (БЕСПЛАТНО) =====
+@dp.message_handler(Text(equals=["💳 Оплатить подписку", "💳 Продлить подписку"]))
+async def buy_sub(message: types.Message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("✅ 1 месяц (тест)", callback_data="pay_1"))
+    markup.add(types.InlineKeyboardButton("✅ 6 месяцев (тест)", callback_data="pay_6"))
     
-    await message.answer(
-        "💳 <b>Выбор подписки</b>\n\n"
-        "Сейчас режим ТЕСТИРОВАНИЯ - подписка бесплатная!\n"
-        "Выберите период:",
-        reply_markup=keyboard
-    )
+    await message.answer("Выберите период (сейчас бесплатно):", reply_markup=markup)
 
-@dp.callback_query(F.data.startswith("pay_"))
-async def process_payment(callback: CallbackQuery):
+@dp.callback_query_handler(lambda c: c.data.startswith("pay_"))
+async def process_payment(callback: types.CallbackQuery):
     months = int(callback.data.split("_")[1])
-    
-    # Активируем подписку (без реальной оплаты!)
     end_date = datetime.now() + timedelta(days=30*months)
     users[callback.from_user.id]["sub_end"] = end_date.isoformat()
     
-    await callback.message.edit_text(
-        f"✅ <b>Подписка активирована!</b>\n\n"
-        f"📅 Действует до: {end_date.strftime('%d.%m.%Y')}\n"
-        f"💰 Списано: 0₽ (тестовый режим)"
+    await bot.edit_message_text(
+        f"✅ Подписка активирована до: {end_date.strftime('%d.%m.%Y')}",
+        chat_id=callback.message.chat.id,
+        message_id=callback.message.message_id
     )
-    
-    await callback.message.answer("Главное меню:", reply_markup=get_menu(callback.from_user.id))
+    await callback.message.answer("Готово!", reply_markup=get_menu(callback.from_user.id))
 
-@dp.message(F.text == "ℹ️ Моя подписка")
-@dp.message(F.text == "ℹ️ Мой аккаунт")
-async def info(message: Message):
+@dp.message_handler(Text(equals=["ℹ️ Моя подписка", "ℹ️ Мой аккаунт"]))
+async def info(message: types.Message):
     user = users.get(message.from_user.id)
     if not user:
-        await message.answer("Сначала зарегистрируйтесь!")
-        return
+        return await message.answer("Сначала зарегистрируйтесь!")
     
     sub_end = user.get("sub_end")
-    if sub_end:
-        end_date = datetime.fromisoformat(sub_end)
-        days_left = (end_date - datetime.now()).days
-        status = f"✅ Активна (осталось {days_left} дней)"
-    else:
-        status = "❌ Нет подписки"
+    status = f"✅ До {datetime.fromisoformat(sub_end).strftime('%d.%m.%Y')}" if sub_end else "❌ Нет"
     
     await message.answer(
         f"📊 <b>Информация</b>\n\n"
         f"🏢 Автомойка: {user['carwash']}\n"
-        f"👤 Владелец: {user['owner']}\n"
         f"🔑 Логин: <code>{user['login']}</code>\n"
         f"🔒 Пароль: <code>{user['password']}</code>\n"
-        f"📅 Статус: {status}"
+        f"📅 Подписка: {status}",
+        parse_mode="HTML"
     )
 
-@dp.message(F.text == "❌ Отменить подписку")
-async def cancel_sub(message: Message):
+@dp.message_handler(Text(equals="❌ Отменить подписку"))
+async def cancel_sub(message: types.Message):
     if message.from_user.id in users:
         users[message.from_user.id]["sub_end"] = None
     await message.answer("❌ Подписка отменена", reply_markup=get_menu(message.from_user.id))
 
-# ===== WEB SERVER для RENDER =====
+# ===== WEB SERVER для Render =====
 async def health_check(request):
-    """Render будет проверять, жив ли сервис"""
-    return web.Response(text="Bot is running!")
+    return web.Response(text="OK")
 
-async def start_web_server():
-    """Запускаем веб-сервер для health checks"""
+async def on_startup(dp):
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
-    
-    # Запускаем в фоне
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
 
-# ===== ЗАПУСК =====
-async def main():
-    # Запускаем веб-сервер (для Render)
-    await start_web_server()
-    
-    # Запускаем бота
-    await dp.start_polling(bot)
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
