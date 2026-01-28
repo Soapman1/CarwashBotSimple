@@ -277,4 +277,13 @@ async def on_startup(dp):
     print(f"✅ Web server started on port {PORT}")
 
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+    # skip_updates=True — игнорирует сообщения, которые пришли пока бот был офлайн
+    # reset_webhook=True — сбрасывает webhook (если был установлен)
+    executor.start_polling(
+        dp, 
+        skip_updates=True, 
+        reset_webhook=True,
+        on_startup=on_startup,
+        timeout=20,
+        relax=0.1
+    )
