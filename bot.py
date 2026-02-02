@@ -49,34 +49,38 @@ def is_admin(user_id):
     return user_id == ADMIN_ID
 
 # ===== КЛАВИАТУРЫ =====
-def get_main_menu(telegram_id):
-    """Главное меню"""
-    # Админское меню
-    if is_admin(telegram_id):
+def get_main_menu(telegram_id, force_user_menu=False):
+    """
+    Главное меню
+    force_user_menu=True - принудительно показать обычное меню (для кнопки "Назад")
+    """
+    # Если админ хочет обычное меню ИЛИ это не админ
+    if force_user_menu or not is_admin(telegram_id):
+        # Обычное меню для пользователей
+        user = get_user_by_telegram(telegram_id)
+        if not user:
+            kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            kb.add(types.KeyboardButton("📝 Зарегистрироваться"))
+            return kb
+        
+        has_sub = user.subscription_end and user.subscription_end > datetime.now()
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.row("➕ Создать бесплатный аккаунт")
-        kb.row("📊 Статистика")
-        kb.row("🔙 Обычное меню")
+        
+        if has_sub:
+            kb.row("💳 Продлить подписку")
+            kb.row("ℹ️ Моя подписка")
+            kb.row("❌ Отменить подписку")
+        else:
+            kb.row("💳 Оплатить подписку")
+            kb.row("ℹ️ Мой аккаунт")
+        
         return kb
     
-    # Обычное меню
-    user = get_user_by_telegram(telegram_id)
-    if not user:
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(types.KeyboardButton("📝 Зарегистрироваться"))
-        return kb
-    
-    has_sub = user.subscription_end and user.subscription_end > datetime.now()
+    # Админское меню (только если не force_user_menu)
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    
-    if has_sub:
-        kb.row("💳 Продлить подписку")
-        kb.row("ℹ️ Моя подписка")
-        kb.row("❌ Отменить подписку")
-    else:
-        kb.row("💳 Оплатить подписку")
-        kb.row("ℹ️ Мой аккаунт")
-    
+    kb.row("➕ Создать бесплатный аккаунт")
+    kb.row("📊 Статистика")
+    kb.row("🔙 Обычное меню")
     return kb
 
 # ===== СОСТОЯНИЯ =====
@@ -111,6 +115,11 @@ async def admin_start_create(message: types.Message):
     
     await AdminCreateState.waiting_carwash_name.set()
     await message.answer("🔧 Создание бесплатного аккаунта\n\nВведите название автомойки:")
+
+@dp.message_handler(Text(equals="🔙 Обычное меню"))
+async def back_to_menu(message: types.Message):
+    # force_user_menu=True - показываем обычное меню даже для админа
+    await message.answer("Главное меню:", reply_markup=get_main_menu(message.from_user.id, force_user_menu=True))
 
 @dp.message_handler(state=AdminCreateState.waiting_carwash_name)
 async def admin_process_name(message: types.Message, state: FSMContext):
