@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import string
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
@@ -11,12 +11,13 @@ from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters import Text
 from aiogram.dispatcher.filters.state import State, StatesGroup
 
-from database import init_db, create_user, get_user_by_telegram, update_subscription, cancel_subscription, get_user_info
+from database import init_db, create_user, get_user_by_telegram, update_subscription, cancel_subscription, get_user_info, Session, User
 
 # Настройки
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))  # ID админа (твой Telegram ID)
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN не установлен!")
@@ -44,13 +45,24 @@ def transliterate(name):
     result = ''.join(c for c in result if c.isalnum())
     return result.capitalize()[:20]
 
+def is_admin(user_id):
+    """Проверка, является ли пользователь админом"""
+    return user_id == ADMIN_ID
+
 # ===== КЛАВИАТУРЫ =====
 def get_main_menu(telegram_id):
-    from database import Session, User
-    session = Session()
-    user = session.query(User).filter_by(telegram_id=telegram_id).first()
-    session.close()
+    """Главное меню в зависимости от статуса и прав"""
+    user = get_user_by_telegram(telegram_id)
     
+    # Админское меню (видно только админу)
+    if is_admin(telegram_id):
+        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.row("➕ Создать бесплатный аккаунт")
+        kb.row("📊 Статистика")
+        kb.row("🔙 Обычное меню")
+        return kb
+    
+    # Обычное меню для пользователей
     if not user:
         kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add(types.KeyboardButton("📝 Зарегистрироваться"))
@@ -69,19 +81,43 @@ def get_main_menu(telegram_id):
     
     return kb
 
-# ===== ОБРАБОТЧИКИ =====
+# ===== СОСТОЯНИЯ =====
 class RegState(StatesGroup):
     waiting_carwash_name = State()
     waiting_owner_name = State()
 
+class AdminCreateState(StatesGroup):
+    waiting_carwash_name = State()
+    waiting_owner_name = State()
+    waiting_days = State()
+
+# ===== ОБРАБОТЧИКИ =====
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    await message.answer("👋 Привет! Бот для автомойки.", reply_markup=get_main_menu(message.from_user.id))
+    await message.answer(
+        "👋 Привет! Бот для управления автомойкой.",
+        reply_markup=get_main_menu(message.from_user.id)
+    )
 
+@dp.message_handler(commands=['admin'])
+async def cmd_admin(message: types.Message):
+    """Команда для входа в админ-панель"""
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ У вас нет прав администратора")
+    
+    await message.answer(
+        "🔧 <b>Админ-панель</b>\n\n"
+        "Вы можете создавать бесплатные аккаунты на любой срок.",
+        parse_mode="HTML",
+        reply_markup=get_main_menu(message.from_user.id)
+    )
+
+# ===== ОБЫЧНАЯ РЕГИСТРАЦИЯ (как было) =====
 @dp.message_handler(Text(equals="📝 Зарегистрироваться"))
 async def start_reg(message: types.Message):
     if get_user_by_telegram(message.from_user.id):
         return await message.answer("Вы уже зарегистрированы!")
+    
     await RegState.waiting_carwash_name.set()
     await message.answer("Введите название автомойки:")
 
@@ -90,7 +126,7 @@ async def process_name(message: types.Message, state: FSMContext):
     login = transliterate(message.text)
     await state.update_data(carwash=message.text, login=login)
     await RegState.waiting_owner_name.set()
-    await message.answer(f"Логин будет: <b>{login}</b>\nВведите ваше имя:", parse_mode="HTML")
+    await message.answer(f"Логин: <b>{login}</b>\nВведите ваше имя:", parse_mode="HTML")
 
 @dp.message_handler(state=RegState.waiting_owner_name)
 async def process_owner(message: types.Message, state: FSMContext):
@@ -109,13 +145,125 @@ async def process_owner(message: types.Message, state: FSMContext):
     
     if result:
         await message.answer(
-            f"✅ Аккаунт создан!\nЛогин: <code>{result['login']}</code>\nПароль: <code>{result['password']}</code>\n\nТеперь можно войти на сайт.",
+            f"✅ Аккаунт создан!\nЛогин: <code>{result['login']}</code>\nПароль: <code>{result['password']}</code>",
             parse_mode="HTML",
             reply_markup=get_main_menu(message.from_user.id)
         )
     else:
         await message.answer(f"❌ Ошибка: {error}")
 
+# ===== АДМИНСКОЕ СОЗДАНИЕ АККАУНТА =====
+@dp.message_handler(Text(equals="➕ Создать бесплатный аккаунт"))
+async def admin_start_create(message: types.Message):
+    """Админ начинает создание бесплатного аккаунта"""
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Нет доступа")
+    
+    await AdminCreateState.waiting_carwash_name.set()
+    await message.answer(
+        "🔧 <b>Создание бесплатного аккаунта</b>\n\n"
+        "Введите название автомойки:",
+        parse_mode="HTML"
+    )
+
+@dp.message_handler(state=AdminCreateState.waiting_carwash_name)
+async def admin_process_name(message: types.Message, state: FSMContext):
+    login = transliterate(message.text)
+    
+    # Проверяем, свободен ли логин
+    session = Session()
+    existing = session.query(User).filter_by(login=login).first()
+    session.close()
+    
+    if existing:
+        login = f"{login}{random.randint(1,99)}"
+    
+    await state.update_data(carwash=message.text, login=login)
+    await AdminCreateState.waiting_owner_name.set()
+    
+    await message.answer(
+        f"Логин будет: <b>{login}</b>\n\n"
+        f"Введите имя владельца:",
+        parse_mode="HTML"
+    )
+
+@dp.message_handler(state=AdminCreateState.waiting_owner_name)
+async def admin_process_owner(message: types.Message, state: FSMContext):
+    await state.update_data(owner=message.text)
+    await AdminCreateState.waiting_days.set()
+    
+    await message.answer(
+        "На сколько дней активировать подписку?\n"
+        "Введите число (например: 30, 90, 365):"
+    )
+
+@dp.message_handler(state=AdminCreateState.waiting_days)
+async def admin_process_days(message: types.Message, state: FSMContext):
+    try:
+        days = int(message.text)
+        if days <= 0 or days > 3650:  # Максимум 10 лет
+            raise ValueError()
+    except ValueError:
+        await message.answer("❌ Введите корректное число дней (1-3650):")
+        return
+    
+    data = await state.get_data()
+    password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    
+    # Создаем пользователя БЕЗ telegram_id (это аккаунт для другого человека)
+    from database import create_user_admin
+    
+    result, error = create_user_admin(
+        login=data['login'],
+        password=password,
+        carwash_name=data['carwash'],
+        owner_name=data['owner'],
+        days=days
+    )
+    
+    await state.finish()
+    
+    if result:
+        end_date = datetime.now() + timedelta(days=days)
+        await message.answer(
+            f"✅ <b>Бесплатный аккаунт создан!</b>\n\n"
+            f"🏢 Автомойка: {data['carwash']}\n"
+            f"👤 Владелец: {data['owner']}\n"
+            f"🔑 Логин: <code>{result['login']}</code>\n"
+            f"🔒 Пароль: <code>{result['password']}</code>\n"
+            f"📅 Подписка до: <b>{end_date.strftime('%d.%m.%Y')}</b> ({days} дней)\n\n"
+            f"Отправьте эти данные клиенту!",
+            parse_mode="HTML",
+            reply_markup=get_main_menu(message.from_user.id)
+        )
+    else:
+        await message.answer(f"❌ Ошибка: {error}")
+
+@dp.message_handler(Text(equals="📊 Статистика"))
+async def admin_stats(message: types.Message):
+    """Статистика для админа"""
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Нет доступа")
+    
+    session = Session()
+    total_users = session.query(User).count()
+    active_subs = session.query(User).filter(
+        User.subscription_end > datetime.now()
+    ).count()
+    session.close()
+    
+    await message.answer(
+        f"📊 <b>Статистика</b>\n\n"
+        f"👥 Всего пользователей: {total_users}\n"
+        f"✅ Активных подписок: {active_subs}"
+    )
+
+@dp.message_handler(Text(equals="🔙 Обычное меню"))
+async def back_to_user_menu(message: types.Message):
+    """Вернуться в обычное меню"""
+    await message.answer("Главное меню:", reply_markup=get_main_menu(message.from_user.id))
+
+# ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (без изменений) =====
 @dp.message_handler(Text(equals=["💳 Оплатить подписку", "💳 Продлить подписку"]))
 async def buy_sub(message: types.Message):
     user = get_user_by_telegram(message.from_user.id)
@@ -160,15 +308,13 @@ async def cancel(message: types.Message):
 async def on_startup(dp):
     if RENDER_HOST:
         await bot.set_webhook(f"https://{RENDER_HOST}/webhook/{TOKEN}")
-        logging.info(f"Webhook установлен: https://{RENDER_HOST}/webhook/{TOKEN}")
+        logging.info(f"Webhook установлен")
 
 async def on_shutdown(dp):
     await bot.delete_webhook()
-    logging.info("Webhook удален")
 
 if __name__ == "__main__":
     if RENDER_HOST:
-        # Webhook mode - используем только один порт (10000)
         executor.start_webhook(
             dispatcher=dp,
             webhook_path=f'/webhook/{TOKEN}',
@@ -179,5 +325,4 @@ if __name__ == "__main__":
             port=PORT,
         )
     else:
-        # Local mode - polling
         executor.start_polling(dp, skip_updates=True)

@@ -152,3 +152,43 @@ def get_user_info(telegram_id):
         "status": status_text,
         "has_active_sub": sub_end and sub_end > now
     }
+
+def create_user_admin(login, password, carwash_name, owner_name, days):
+    """Создание пользователя админом (без telegram_id, сразу с подпиской)"""
+    from datetime import timedelta
+    
+    session = Session()
+    try:
+        # Проверяем логин
+        existing = session.query(User).filter_by(login=login).first()
+        if existing:
+            return None, "Логин уже занят"
+        
+        # Создаем с подпиской
+        end_date = datetime.now() + timedelta(days=days)
+        
+        user = User(
+            telegram_id=None,  # Нет привязки к Telegram
+            login=login,
+            password=password,
+            carwash_name=carwash_name,
+            owner_name=owner_name,
+            subscription_end=end_date,
+            is_active=True
+        )
+        
+        session.add(user)
+        session.commit()
+        
+        return {
+            "id": user.id,
+            "login": user.login,
+            "password": user.password
+        }, None
+        
+    except Exception as e:
+        session.rollback()
+        print(f"Ошибка создания пользователя админом: {e}")
+        return None, str(e)
+    finally:
+        session.close()
