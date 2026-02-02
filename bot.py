@@ -17,7 +17,7 @@ from database import init_db, create_user, get_user_by_telegram, update_subscrip
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))  # ID админа (твой Telegram ID)
+ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "477510130"))  # ID админа (твой Telegram ID)
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN не установлен!")
