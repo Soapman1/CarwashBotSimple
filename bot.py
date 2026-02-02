@@ -54,10 +54,16 @@ def get_main_menu(telegram_id, force_user_menu=False):
     Главное меню
     force_user_menu=True - принудительно показать обычное меню (для кнопки "Назад")
     """
+    from database import Session, User
+    session = Session()
+    user = get_user_by_telegram(telegram_id)
+    session.close()
+
     # Если админ хочет обычное меню ИЛИ это не админ
     if force_user_menu or not is_admin(telegram_id):
         # Обычное меню для пользователей
-        user = get_user_by_telegram(telegram_id)
+
+        
         if not user:
             kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
             kb.add(types.KeyboardButton("📝 Зарегистрироваться"))
