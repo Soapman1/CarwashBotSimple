@@ -5,6 +5,7 @@ import random
 import string
 from datetime import datetime, timedelta
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
@@ -16,7 +17,8 @@ from database import init_db, create_user, get_user_by_telegram, update_subscrip
 # Настройки
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
-RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST") or os.getenv("RENDER_EXTERNAL_HOSTNAME")
+USE_WEBHOOK = os.getenv("USE_WEBHOOK", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "477510130"))
 
 if not TOKEN:
@@ -27,6 +29,8 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
+
+healthcheck_runner = None
 
 init_db()
 
@@ -276,15 +280,50 @@ async def cancel(message: types.Message):
     await message.answer("❌ Отменено", reply_markup=get_main_menu(message.from_user.id))
 
 # ===== ЗАПУСК =====
+async def start_healthcheck_server():
+    app = web.Application()
+
+    async def health(_request):
+        return web.Response(text="ok")
+
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host='0.0.0.0', port=PORT)
+    await site.start()
+    logging.info("Healthcheck сервер запущен на порту %s", PORT)
+    return runner
+
 async def on_startup(dp):
-    if RENDER_HOST:
-        await bot.set_webhook(f"https://{RENDER_HOST}/webhook/{TOKEN}")
+    global healthcheck_runner
+
+    if USE_WEBHOOK and WEBHOOK_HOST:
+        webhook_host = WEBHOOK_HOST.replace("https://", "").replace("http://", "").strip("/")
+        webhook_url = f"https://{webhook_host}/webhook/{TOKEN}"
+        logging.info("Запускаю webhook: %s", webhook_url)
+        await bot.set_webhook(webhook_url)
+    else:
+        # Важно: если webhook был установлен в прошлых деплоях,
+        # polling не получает апдейты, пока webhook не удален.
+        await bot.delete_webhook(drop_pending_updates=False)
+        # Для Render Web Service нужно открыть порт, иначе деплой завершается timeout.
+        healthcheck_runner = await start_healthcheck_server()
+        logging.info("Webhook отключен, бот запущен в polling режиме")
 
 async def on_shutdown(dp):
-    await bot.delete_webhook()
+    global healthcheck_runner
+
+    if USE_WEBHOOK:
+        await bot.delete_webhook()
+
+    if healthcheck_runner:
+        await healthcheck_runner.cleanup()
+        healthcheck_runner = None
 
 if __name__ == "__main__":
-    if RENDER_HOST:
+    if USE_WEBHOOK and WEBHOOK_HOST:
         executor.start_webhook(
             dispatcher=dp,
             webhook_path=f'/webhook/{TOKEN}',
@@ -295,4 +334,4 @@ if __name__ == "__main__":
             port=PORT,
         )
     else:
-        executor.start_polling(dp, skip_updates=True)
+        executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
