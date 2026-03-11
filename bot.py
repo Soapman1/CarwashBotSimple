@@ -16,7 +16,8 @@ from database import init_db, create_user, get_user_by_telegram, update_subscrip
 # Настройки
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
-RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST") or os.getenv("RENDER_EXTERNAL_HOSTNAME")
+USE_WEBHOOK = os.getenv("USE_WEBHOOK", "false").lower() in {"1", "true", "yes", "on"}
 ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "477510130"))
 
 if not TOKEN:
@@ -277,14 +278,20 @@ async def cancel(message: types.Message):
 
 # ===== ЗАПУСК =====
 async def on_startup(dp):
-    if RENDER_HOST:
-        await bot.set_webhook(f"https://{RENDER_HOST}/webhook/{TOKEN}")
+    if USE_WEBHOOK and WEBHOOK_HOST:
+        webhook_host = WEBHOOK_HOST.replace("https://", "").replace("http://", "").strip("/")
+        webhook_url = f"https://{webhook_host}/webhook/{TOKEN}"
+        logging.info("Запускаю webhook: %s", webhook_url)
+        await bot.set_webhook(webhook_url)
+    else:
+        logging.info("Webhook отключен, бот запущен в polling режиме")
 
 async def on_shutdown(dp):
-    await bot.delete_webhook()
+    if USE_WEBHOOK:
+        await bot.delete_webhook()
 
 if __name__ == "__main__":
-    if RENDER_HOST:
+    if USE_WEBHOOK and WEBHOOK_HOST:
         executor.start_webhook(
             dispatcher=dp,
             webhook_path=f'/webhook/{TOKEN}',
@@ -295,4 +302,4 @@ if __name__ == "__main__":
             port=PORT,
         )
     else:
-        executor.start_polling(dp, skip_updates=True)
+        executor.start_polling(dp, skip_updates=True, on_startup=on_startup, on_shutdown=on_shutdown)
